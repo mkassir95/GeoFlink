@@ -12,7 +12,9 @@ import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple4;
 import org.apache.flink.api.java.tuple.Tuple5;
+import org.apache.flink.api.java.tuple.Tuple7;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.KeyedStream;
@@ -65,7 +67,7 @@ public class StreamingJob {
             @Override
             public Tuple2<String, Double> map(String value) throws Exception {
                 String[] parts = value.split("@");
-                if (parts.length == 8) {
+                if (parts.length == 9) {
                     String robotID = parts[0];
                     String speedStr = parts[5];
                     if (speedStr.endsWith("m/s")) {
@@ -125,7 +127,7 @@ public class StreamingJob {
             @Override
             public Tuple5<String, Double,Double,Double,Double> map(String value) throws Exception {
                 String[] parts = value.split("@");
-                if (parts.length == 8) {
+                if (parts.length == 9) {
                     String robotID = parts[0];
                     Double firstLatitude = Double.parseDouble(parts[1]);
                     Double firstLongitude = Double.parseDouble(parts[2]);
@@ -133,6 +135,7 @@ public class StreamingJob {
                     Double lastLongitude = Double.parseDouble(parts[4]);
                     long firstTimeStamp = (long) Double.parseDouble(parts[6]);
                     long lastTimeStamp = (long) Double.parseDouble(parts[7]);
+                    long esperProcessingTime=(long) Double.parseDouble(parts[8]);
 
                     // Define the bounding box for your grid based on the provided coordinates
                     double gridMinX = 3.433594;
@@ -148,8 +151,8 @@ public class StreamingJob {
 
 
 
-                    Point firstPoint = new Point(robotID, firstLatitude, firstLongitude, firstTimeStamp, uGrid);
-                    Point lastPoint = new Point(robotID, lastLatitude, lastLongitude, lastTimeStamp, uGrid);
+                    Point firstPoint = new Point(robotID, firstLatitude, firstLongitude, firstTimeStamp, uGrid,esperProcessingTime);
+                    Point lastPoint = new Point(robotID, lastLatitude, lastLongitude, lastTimeStamp, uGrid,esperProcessingTime);
 
 
                     //System.out.println("Point 1: " + firstPoint.toString());
@@ -178,7 +181,7 @@ public class StreamingJob {
             public void flatMap(String value, Collector<Point> out) throws Exception {
                 try {
                     String[] parts = value.split("@");
-                    if (parts.length == 8) {
+                    if (parts.length == 9) {
                         String robotID = parts[0];
                         Double firstLatitude = Double.parseDouble(parts[1]);
                         Double firstLongitude = Double.parseDouble(parts[2]);
@@ -186,6 +189,7 @@ public class StreamingJob {
                         Double lastLongitude = Double.parseDouble(parts[4]);
                         long firstTimeStamp = (long) Double.parseDouble(parts[6]);
                         long lastTimeStamp = (long) Double.parseDouble(parts[7]);
+                        long esperProcessingTime=(long) Double.parseDouble(parts[8]);
 
                         // Define the bounding box for your grid based on the provided coordinates
                         double gridMinX = 3.433594;
@@ -200,8 +204,8 @@ public class StreamingJob {
                         UniformGrid uGrid = new UniformGrid(cellLengthMeters, gridMinX, gridMaxX, gridMinY, gridMaxY);
 
                         // Create the Point objects
-                        Point firstPoint = new Point(robotID, firstLatitude, firstLongitude, firstTimeStamp, uGrid);
-                        Point lastPoint = new Point(robotID, lastLatitude, lastLongitude, lastTimeStamp, uGrid);
+                        Point firstPoint = new Point(robotID, firstLatitude, firstLongitude, firstTimeStamp, uGrid,esperProcessingTime);
+                        Point lastPoint = new Point(robotID, lastLatitude, lastLongitude, lastTimeStamp, uGrid,esperProcessingTime);
 
                         // Collect both points
                         out.collect(firstPoint);
@@ -235,6 +239,7 @@ public class StreamingJob {
                 .process(new ProcessAllWindowFunction<Point, String, TimeWindow>() {
                     @Override
                     public void process(Context context, Iterable<Point> elements, Collector<String> out) throws Exception {
+                        long startTime = System.currentTimeMillis(); // Start timing
                         List<Point> points = new ArrayList<>();
                         for (Point point : elements) {
                             points.add(point);
@@ -268,16 +273,144 @@ public class StreamingJob {
                             double minDistance = entry.getValue();
                             Point point1 = closestPoints.get(trajectoryPairKey).f0;
                             Point point2 = closestPoints.get(trajectoryPairKey).f1;
-                            System.out.println("Minimum distance between " + point1.objID + " and " + point2.objID + " in the last 15 seconds is: " + minDistance + " meters");
-                            out.collect(point1.objID + "@" + minDistance +" meters"+"@"+ point2.objID);
+                            System.out.println("Esper+GeoFlink Minimum distance between " + point1.objID + " and " + point2.objID + " in the last 15 seconds is: " + minDistance + " meters");
+                            long endTime = System.currentTimeMillis(); // End timing
+                            long executionTime = endTime - startTime+points.get(0).processingTime; // Calculate execution time
+                            System.out.println("Esper+GeoFlink Window Execution Time: " + executionTime + " ms"); // Output execution
+                            String output = point1.objID + "," + point2.objID + "," + minDistance+","+executionTime;
+                            out.collect(output);
                         }
                     }
                 });
 
         //windowedStream.print();
         windowedStream.addSink(alertProducer);
+        // Define the output path for the CSV file
+        String outputPath1 = "/home/mkassir/esper+geoflink_trajectory_distance.csv";
+
+// Write the formatted stream to a CSV file
+        windowedStream.writeAsText(outputPath1, FileSystem.WriteMode.OVERWRITE).setParallelism(1);
+
+        // Create Kafka consumer for "r2k_pos"
+        FlinkKafkaConsumer<String> kafkaConsumerR2KPos = new FlinkKafkaConsumer<>(
+                "r2k_pos",
+                new SimpleStringSchema(),
+                properties
+        );
+
+        // Add source for "r2k_pos"
+        DataStream<String> streamFromR2KPos = env.addSource(kafkaConsumerR2KPos);
+
+        DataStream<Point> parsedStreamR2KPos = streamFromR2KPos.flatMap(new FlatMapFunction<String, Point>() {
+            @Override
+            public void flatMap(String value, Collector<Point> out) throws Exception {
+                try {
+                    String[] parts = value.split("\\s+");
+                    if (parts.length >=8) {
+                        Long timestamp = Long.parseLong(parts[0]);
+                        String role = parts[1];
+                        Double latitude = Double.parseDouble(parts[3]);
+                        Double longitude = Double.parseDouble(parts[4]);
+
+                        // Define the bounding box for your grid based on the provided coordinates
+                        double gridMinX = 3.433594;
+                        double gridMinY = 46.339055;
+                        double gridMaxX = 3.433618;
+                        double gridMaxY = 46.339102;
+
+                        // Define the cell length in meters
+                        double cellLengthMeters = 0.1; // Adjust this value based on the desired resolution
+
+                        // Create the UniformGrid
+                        UniformGrid uGrid = new UniformGrid(cellLengthMeters, gridMinX, gridMaxX, gridMinY, gridMaxY);
+
+                        // Create the Point objects
+                        Point point = new Point(role, latitude, longitude, timestamp, uGrid);
+
+                        // Collect both points
+                        out.collect(point);
+
+                    }
+                } catch (Exception e) {
+                    LOG.error("Error parsing GPS data: " + value, e);
+                }
+            }
+        });
 
 
+
+// Print all parsed data
+       // parsedStreamR2KPos
+              //  .filter(value -> value != null) // Optional: Ensure no null values are printed
+              //  .print();
+        DataStream<String> geoFlinkWindowedStream = parsedStreamR2KPos
+                .windowAll(TumblingProcessingTimeWindows.of(Time.seconds(15)))
+                .process(new ProcessAllWindowFunction<Point, String, TimeWindow>() {
+                    @Override
+                    public void process(Context context, Iterable<Point> elements, Collector<String> out) throws Exception {
+                        long startTime = System.currentTimeMillis(); // Start timing
+                        List<Point> points = new ArrayList<>();
+                        for (Point point : elements) {
+                            points.add(point);
+                        }
+
+                        // Define a map to store the minimum distance between each pair of trajectories
+                        Map<String, Double> minDistances = new HashMap<>();
+                        Map<String, Tuple2<Point, Point>> closestPoints = new HashMap<>();
+
+                        // Iterate over all points and find the minimum distance for each pair of trajectories
+                        for (Point point1 : points) {
+                            for (Point point2 : points) {
+                                if (!point1.objID.equals(point2.objID)) {
+                                    String trajectoryPairKey = point1.objID + "-" + point2.objID;
+
+                                    // Calculate the distance between point1 and point2
+                                    double distance = DistanceFunctions.getDistance(point1, point2);
+
+                                    // Update the minimum distance for this trajectory pair
+                                    if (!minDistances.containsKey(trajectoryPairKey) || distance < minDistances.get(trajectoryPairKey)) {
+                                        minDistances.put(trajectoryPairKey, distance);
+                                        closestPoints.put(trajectoryPairKey, new Tuple2<>(point1, point2));
+                                    }
+                                }
+                            }
+                        }
+
+                        // Output the result with the minimum distance for each trajectory pair
+                        for (Map.Entry<String, Double> entry : minDistances.entrySet()) {
+                            String trajectoryPairKey = entry.getKey();
+                            double minDistance = entry.getValue();
+                            Point point1 = closestPoints.get(trajectoryPairKey).f0;
+                            Point point2 = closestPoints.get(trajectoryPairKey).f1;
+                            System.out.println("GeoFlink Minimum distance between " + point1.objID + " and " + point2.objID + " in the last 15 seconds is: " + minDistance + " meters");
+                            long endTime = System.currentTimeMillis(); // End timing
+                            long executionTime = endTime - startTime; // Calculate execution time
+                            System.out.println("GeoFlink Window Execution Time: " + executionTime + " ms"); // Output execution time
+                            String output = point1.objID + "," + point2.objID + "," + minDistance+","+executionTime;
+                            out.collect(output);
+                        }
+
+                    }
+                });
+
+
+
+        // Kafka producer properties for alerts
+
+
+        // Setup Kafka producer for alerts
+        FlinkKafkaProducer<String> geoFlinkProducer = new FlinkKafkaProducer<>(
+                "distances_2geoflink",
+                new SimpleStringSchema(),
+                alertProperties
+        );
+        geoFlinkWindowedStream.addSink(geoFlinkProducer);
+
+        // Define the output path for the CSV file
+        String outputPath = "/home/mkassir/geoflink_trajectory_distance.csv";
+
+// Write the formatted stream to a CSV file
+        geoFlinkWindowedStream.writeAsText(outputPath, FileSystem.WriteMode.OVERWRITE).setParallelism(1);
 
 
 

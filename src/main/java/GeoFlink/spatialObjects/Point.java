@@ -45,6 +45,7 @@ public class Point extends SpatialObject implements Serializable {
     public String deviceID;
     public String userID;
     Date date = new Date();
+    public long processingTime;
 
     public Point() {}; // required for POJO
 
@@ -97,6 +98,18 @@ public class Point extends SpatialObject implements Serializable {
         this.timeStampMillisec = timeStampMillisec;
         this.gridID = HelperClass.assignGridCellID(point.getCoordinate(), uGrid);
         this.ingestionTime = date.getTime();
+    }
+
+    public Point(String objID, double x, double y, long timeStampMillisec, UniformGrid uGrid,long processingTime) {
+        Date date = new Date();
+        GeometryFactory geofact = new GeometryFactory();
+        //create geotools point object
+        point = geofact.createPoint(new Coordinate(x, y));
+        this.objID = objID;
+        this.timeStampMillisec = timeStampMillisec;
+        this.gridID = HelperClass.assignGridCellID(point.getCoordinate(), uGrid);
+        this.ingestionTime = date.getTime();
+        this.processingTime=processingTime;
     }
 
     public Point(String objID, double x, double y, long timeStampMillisec, String gridID) {
