@@ -8,6 +8,8 @@ import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple4;
@@ -20,6 +22,7 @@ import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.KeyedStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.co.CoProcessFunction;
 import org.apache.flink.streaming.api.functions.windowing.AllWindowFunction;
 import org.apache.flink.streaming.api.functions.windowing.ProcessAllWindowFunction;
 import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
@@ -413,8 +416,57 @@ public class StreamingJob {
         geoFlinkWindowedStream.writeAsText(outputPath, FileSystem.WriteMode.OVERWRITE).setParallelism(1);
 
 
+// Assuming Point has a getRobotID method or similar identifier.
+        KeyedStream<String, String> keyedWindowedStream = windowedStream
+                .keyBy(record -> record.split(",")[0]);  // Assuming the robotID is the first element in the comma-separated string.
+
+        KeyedStream<String, String> keyedGeoFlinkWindowedStream = geoFlinkWindowedStream
+                .keyBy(record -> record.split(",")[0]);  // Assuming the structure.
+        DataStream<String> joinedStream = keyedWindowedStream
+                .connect(keyedGeoFlinkWindowedStream)
+                .process(new CoProcessFunction<String, String, String>() {
+                    private ValueState<String> stream1State;
+
+                    @Override
+                    public void open(Configuration config) {
+                        stream1State = getRuntimeContext().getState(new ValueStateDescriptor<>("stream1", String.class));
+                    }
+
+                    @Override
+                    public void processElement1(String value, Context ctx, Collector<String> out) throws Exception {
+                        // Store the data from the first stream (stream1)
+                        stream1State.update(value);
+                        // Set a timer to clear state later if needed
+                        ctx.timerService().registerEventTimeTimer(ctx.timestamp() + 60000);  // Adjust as necessary
+                    }
+
+                    @Override
+                    public void processElement2(String value, Context ctx, Collector<String> out) throws Exception {
+                        // When the second stream data arrives, check for the first stream's state
+                        String stream1Value = stream1State.value();
+                        if (stream1Value != null) {
+                            // Collect output only when both streams have data
+                            out.collect("Joined: " + stream1Value + " & " + value);
+                            // Optionally clear state after the join
+                            stream1State.clear();
+                        }
+                        // You can decide whether to store the second stream state if needed.
+                    }
+
+                    @Override
+                    public void onTimer(long timestamp, OnTimerContext ctx, Collector<String> out) {
+                        // Clear state after the timer fires
+                        stream1State.clear();
+                    }
+                });
 
 
+        joinedStream.print();
+// Define the output path for the CSV file
+        String outputPath2 = "/home/mkassir/new_result.csv";
+
+// Write the formatted stream to a CSV file
+        joinedStream.writeAsText(outputPath2, FileSystem.WriteMode.OVERWRITE).setParallelism(1);
 
 
 
